@@ -13,3 +13,5 @@ Drafts, company details and saved invoices stay in the current browser. Download
 ## Make it yours
 
 Fork this repository and serve the `public` folder on static hosting. For Cloudflare Pages, choose no framework, leave the build command empty and set the output directory to `public`. To test locally, serve the `public` directory with a local web server.
+
+The [original wholesale and retail demo](https://vat-invoice-generator-56u.pages.dev/classic/) runs the commercial invoice templates with fictional rows and separate browser storage.

@@ -1,0 +1,1529 @@
+/**
+ * VAT Invoice Studio
+ * Hierarchy:
+ * - Main: Wholesale | Retail
+ * - Sub: Wholesale Accessories | Wholesale Devices | Retail Accessories | Retail Devices
+ */
+
+// Master Store Directory from Shop Details.xlsx
+const STORES = [];
+
+// 4 Preset Catalogs
+const CATALOGS = {wsAccessories:[],wsDevices:[],rtAccessories:[],rtDevices:[]};
+
+// Application State
+const state = {
+  activeMain: 'wholesale', // 'wholesale' or 'retail'
+  activeSub: 'ws_acc',     // 'ws_acc', 'ws_dev', 'rt_acc', 'rt_dev'
+  scannedItemsBuffer: [],
+  profiles: {
+    ws_acc: {
+      pricingMode: 'net',
+      invoiceNo: 'DRAFT-001',
+      date: new Date().toISOString().slice(0,10),
+      paymentMethod: 'Card',
+      billTo: {"name":"","address":"","phone":"","email":"","vatNo":""},
+      items: [],
+      taxRate: 0,
+      otherCosts: 0.00
+    },
+    ws_dev: {
+      pricingMode: 'net',
+      invoiceNo: 'DRAFT-001',
+      date: new Date().toISOString().slice(0,10),
+      paymentMethod: 'Bank Transfer',
+      billTo: {"name":"","address":"","phone":"","email":"","vatNo":""},
+      items: [],
+      taxRate: 0,
+      otherCosts: 0.00
+    },
+    rt_acc: {
+      pricingMode: 'gross',
+      reference: 'DRAFT-001',
+      date: new Date().toISOString().slice(0,10),
+      selectedStoreId: null,
+      activeBrand: 'My Business',
+      billFrom: {"name":"","address":"","phone":"","email":""},
+      billTo: {"name":"","email":"","phone":"","address":""},
+      items: [],
+      taxRate: 0,
+      otherCosts: 0.00
+    },
+    rt_dev: {
+      pricingMode: 'gross',
+      reference: 'DRAFT-001',
+      date: new Date().toISOString().slice(0,10),
+      selectedStoreId: null,
+      activeBrand: 'My Business',
+      billFrom: {"name":"","address":"","phone":"","email":""},
+      billTo: {"name":"","email":"","phone":"","address":""},
+      items: [],
+      taxRate: 0,
+      otherCosts: 0.00
+    }
+  },
+  savedInvoices: []
+};
+
+// Initialize Application
+document.addEventListener('DOMContentLoaded', () => {
+  loadSavedInvoicesFromStorage();
+  populateStoreDropdowns();
+  loadAllSampleData();
+  for (const [key, profile] of Object.entries(state.profiles)) {
+    const wholesale = key.startsWith('ws');
+    const device = key.endsWith('dev');
+    profile.invoiceNo = profile.reference = 'SAMPLE-001';
+    profile.billFrom = {name:'Harbour Office Supply',address:'1 Sample Quay, Dublin',vatNo:'DEMO ONLY'};
+    profile.billTo = {name:wholesale ? 'West Quay Workshop' : 'Example customer',address:'4 Sample Lane, Cork'};
+    profile.taxRate = 23;
+    profile.items = [{desc:device ? 'Sample tablet' : 'Desktop stand',model:device ? 'Sample tablet' : '',qty:2,amount:device ? 120 : 25,grossPrice:device ? 147.6 : 30.75}];
+  }
+
+  try { const saved=JSON.parse(localStorage.getItem('classic_vat_working') || 'null'); if(saved) for(const key of ['ws_acc','ws_dev','rt_acc','rt_dev']) if(saved[key]&&Array.isArray(saved[key].items)) state.profiles[key]=saved[key]; } catch {}
+
+
+
+
+
+
+  setupEventListeners();
+  setupScannerHandlers();
+  switchHierarchy('wholesale', 'ws_acc');
+});
+
+// Format Date as DD/MM/YYYY
+function formatDateDisplay(isoDate) {
+  if (!isoDate) return '';
+  const parts = isoDate.split('-');
+  if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  return isoDate;
+}
+
+// Format Euro Currency
+function formatEuro(num) {
+  const val = Number(num) || 0;
+  return '€ ' + val.toFixed(2);
+}
+
+function parseNum(val) {
+  if (typeof val === 'number') return val;
+  if (!val) return 0;
+  const clean = String(val).replace(/[^0-9.-]/g, '');
+  return parseFloat(clean) || 0;
+}
+
+function round2(num) {
+  return Math.round((Number(num) + Number.EPSILON) * 100) / 100;
+}
+
+// Populate Store Selectors
+function populateStoreDropdowns() {
+  const rAccStore = document.getElementById('rt-acc-store-select');
+  const rDevStore = document.getElementById('rt-dev-store-select');
+  const wsAccStore = document.getElementById('ws-acc-store-select');
+  const wsDevStore = document.getElementById('ws-dev-store-select');
+
+  [rAccStore, rDevStore].forEach(sel => {
+    if (sel) {
+      sel.innerHTML = '<option value="">-- Choose Branch (13 Stores) --</option>';
+      STORES.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = `${s.name} (${s.city})`;
+        if (s.id === 5) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    }
+  });
+
+  [wsAccStore, wsDevStore].forEach(sel => {
+    if (sel) {
+      sel.innerHTML = '<option value="">-- Select Customer Preset --</option>';
+      STORES.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = `${s.name} - ${s.city}`;
+        sel.appendChild(opt);
+      });
+    }
+  });
+}
+
+// Load Samples
+function loadAllSampleData() { for (const profile of Object.values(state.profiles)) { profile.items=[]; profile.date=new Date().toISOString().slice(0,10); } }
+
+// Hierarchy Switcher: Main (Wholesale / Retail) -> Sub (Accessories / Devices)
+function switchHierarchy(mainCat, subCat = null) {
+  state.activeMain = mainCat;
+  if (!subCat) {
+    subCat = mainCat === 'wholesale' ? 'ws_acc' : 'rt_acc';
+  }
+  state.activeSub = subCat;
+
+  // Main buttons styling
+  const btnWs = document.getElementById('main-btn-wholesale');
+  const btnRt = document.getElementById('main-btn-retail');
+  if (btnWs) btnWs.className = `main-cat-btn px-3.5 py-1.5 text-xs flex items-center gap-1.5 ${mainCat === 'wholesale' ? 'active-main' : ''}`;
+  if (btnRt) btnRt.className = `main-cat-btn px-3.5 py-1.5 text-xs flex items-center gap-1.5 ${mainCat === 'retail' ? 'active-main' : ''}`;
+
+  // Sub nav groups
+  const snWs = document.getElementById('sub-nav-wholesale');
+  const snRt = document.getElementById('sub-nav-retail');
+  if (snWs) {
+    if (mainCat === 'wholesale') {
+      snWs.classList.remove('hidden');
+      snWs.classList.add('inline-flex');
+    } else {
+      snWs.classList.add('hidden');
+      snWs.classList.remove('inline-flex');
+    }
+  }
+  if (snRt) {
+    if (mainCat === 'retail') {
+      snRt.classList.remove('hidden');
+      snRt.classList.add('inline-flex');
+    } else {
+      snRt.classList.add('hidden');
+      snRt.classList.remove('inline-flex');
+    }
+  }
+
+  // Sub buttons & Canvas & Controls
+  ['ws_acc', 'ws_dev', 'rt_acc', 'rt_dev'].forEach(k => {
+    const btn = document.getElementById(`sub-btn-${k}`);
+    const canvas = document.getElementById(`canvas-${k}`);
+    const controls = document.getElementById(`controls-${k}`);
+
+    if (k === subCat) {
+      if (btn) btn.className = `sub-tab-btn active-sub active-sub-${k} px-3 py-1 text-xs flex items-center gap-1`;
+      canvas?.classList.remove('hidden');
+      if (controls) {
+        controls.classList.remove('hidden');
+        controls.classList.add('flex');
+      }
+    } else {
+      if (btn) btn.className = 'sub-tab-btn px-3 py-1 text-xs flex items-center gap-1';
+      canvas?.classList.add('hidden');
+      if (controls) {
+        controls.classList.add('hidden');
+        controls.classList.remove('flex');
+      }
+    }
+  });
+
+  renderActiveProfile();
+}
+
+// Exact Irish VAT Math
+function calculateProfileTotals(profileKey) {
+  const prof = state.profiles[profileKey];
+  const taxRate = parseNum(prof.taxRate);
+  const taxMultiplier = 1 + (taxRate / 100);
+  const otherCosts = parseNum(prof.otherCosts) || 0;
+  const isGross = prof.pricingMode === 'gross';
+
+  let subtotal = 0;
+  let totalGross = 0;
+
+  if (isGross) {
+    prof.items.forEach(it => {
+      const qty = Math.max(0, parseNum(it.qty ?? 1));
+      let gross = parseNum(it.grossPrice);
+      if (gross === 0 && it.amount) {
+        gross = round2(parseNum(it.amount) * taxMultiplier);
+        it.grossPrice = gross;
+      }
+      const lineGross = round2(qty * gross);
+      const lineNet = round2(lineGross / taxMultiplier);
+      it.lineTotal = lineNet;
+      subtotal += lineNet;
+      totalGross += lineGross;
+    });
+
+    subtotal = round2(subtotal);
+    totalGross = round2(totalGross);
+    const vatAmount = round2(totalGross - subtotal);
+    const totalDue = round2(subtotal + vatAmount + otherCosts);
+    return { subtotal, taxRate, vatAmount, otherCosts, totalDue, totalGross };
+  } else {
+    prof.items.forEach(it => {
+      const qty = Math.max(0, parseNum(it.qty ?? 1));
+      let net = parseNum(it.amount);
+      if (net === 0 && it.grossPrice) {
+        net = round2(parseNum(it.grossPrice) / taxMultiplier);
+        it.amount = net;
+      }
+      const lineTotal = round2(qty * net);
+      it.lineTotal = lineTotal;
+      subtotal += lineTotal;
+    });
+
+    subtotal = round2(subtotal);
+    const vatAmount = round2(subtotal * (taxRate / 100));
+    const totalDue = round2(subtotal + vatAmount + otherCosts);
+    totalGross = totalDue - otherCosts;
+    return { subtotal, taxRate, vatAmount, otherCosts, totalDue, totalGross };
+  }
+}
+
+function togglePricingMode(profileKey) {
+  const prof = state.profiles[profileKey];
+  if (!prof) return;
+  prof.pricingMode = prof.pricingMode === 'gross' ? 'net' : 'gross';
+  renderActiveProfile();
+  showToast(`Pricing mode: ${prof.pricingMode === 'gross' ? '🏷️ Shelf Price (Inc VAT)' : '📊 Net Price (Ex VAT)'}`);
+}
+
+// Master Render
+function renderActiveProfile() {
+  const p = state.activeSub;
+  if (p === 'ws_acc') renderWholesaleAccessories();
+  else if (p === 'ws_dev') renderWholesaleDevices();
+  else if (p === 'rt_acc') renderRetailAccessories();
+  else if (p === 'rt_dev') renderRetailDevices();
+}
+
+function adjustInputWidth(el) {
+  if (!el) return;
+  const len = Math.max((el.value || '').length, (el.placeholder || '').length, 14);
+  el.style.width = (len + 2) + 'ch';
+}
+
+// 1. Render Wholesale Accessories
+function renderWholesaleAccessories() {
+  const data = state.profiles.ws_acc;
+  const calc = calculateProfileTotals('ws_acc');
+  const isGross = data.pricingMode === 'gross';
+  const taxRate = parseNum(data.taxRate);
+
+  document.getElementById('ws-acc-disp-date').textContent = formatDateDisplay(data.date);
+  document.getElementById('ws-acc-input-date').value = data.date;
+  const invNoEl = document.getElementById('ws-acc-input-invoiceno');
+  if (invNoEl) { invNoEl.value = data.invoiceNo; adjustInputWidth(invNoEl); }
+  document.getElementById('ws-acc-input-payment').value = data.paymentMethod;
+
+  document.getElementById('ws-acc-billto-name').value = data.billTo.name || '';
+  document.getElementById('ws-acc-billto-address').value = data.billTo.address || '';
+  document.getElementById('ws-acc-billto-phone').value = data.billTo.phone || '';
+  document.getElementById('ws-acc-billto-email').value = data.billTo.email || '';
+  document.getElementById('ws-acc-billto-vat').value = data.billTo.vatNo || '';
+
+  const tbody = document.getElementById('ws-acc-items-tbody');
+  tbody.innerHTML = '';
+
+  data.items.forEach((item, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'item-row';
+    const grossVal = Number(item.grossPrice || (item.amount ? round2(item.amount * (1 + taxRate/100)) : 0)).toFixed(2);
+    const netVal = Number(item.amount || (item.grossPrice ? round2(item.grossPrice / (1 + taxRate/100)) : 0)).toFixed(2);
+
+    tr.innerHTML = `
+      <td class="row-actions-cell no-print">
+        <div class="row-actions">
+          <button onclick="deleteRow('ws_acc', ${index})" title="Delete" class="text-rose-500 hover:text-rose-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          </button>
+          <button onclick="duplicateRow('ws_acc', ${index})" title="Duplicate" class="text-blue-500 hover:text-blue-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+          </button>
+        </div>
+      </td>
+      <td style="width: 58%;">
+        <input type="text" class="editable-cell-input font-medium" value="${escapeHtml(item.desc)}"
+               oninput="updateItemField('ws_acc', ${index}, 'desc', this.value)" placeholder="Item Description">
+      </td>
+      <td style="width: 10%; text-align: center;">
+        <input type="number" step="1" min="1" class="editable-cell-input text-center mono font-medium"
+               value="${item.qty}" oninput="updateItemCalcField('ws_acc', ${index}, 'qty', this.value)">
+      </td>
+      <td style="width: 16%; text-align: right; white-space: nowrap;">
+        <div class="money-cell">
+          <span class="money-sym">€</span>
+          <span class="print-only money-num" id="ws_acc-printamt-${index}">${netVal}</span>
+          ${isGross ? `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${grossVal}" oninput="updateItemGrossField('ws_acc', ${index}, this.value)" title="Shelf Price Inc VAT">
+          ` : `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${netVal}" oninput="updateItemNetField('ws_acc', ${index}, this.value)" title="Net Price Ex VAT">
+          `}
+        </div>
+        <div class="no-print text-[9px] text-slate-500 font-mono text-right" id="ws_acc-helper-${index}">
+          ${isGross ? `ex VAT: €${netVal}` : `inc VAT: €${grossVal}`}
+        </div>
+      </td>
+      <td style="width: 16%; text-align: right; white-space: nowrap;" id="ws_acc-linetotal-${index}">
+        <div class="money-cell">
+          <span class="money-sym">€</span>
+          <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  updateSummaryDisplays('ws_acc', calc);
+}
+
+// 2. Render Wholesale Devices
+function renderWholesaleDevices() {
+  const data = state.profiles.ws_dev;
+  const calc = calculateProfileTotals('ws_dev');
+  const isGross = data.pricingMode === 'gross';
+  const taxRate = parseNum(data.taxRate);
+
+  document.getElementById('ws-dev-disp-date').textContent = formatDateDisplay(data.date);
+  document.getElementById('ws-dev-input-date').value = data.date;
+  const invNoEl = document.getElementById('ws-dev-input-invoiceno');
+  if (invNoEl) { invNoEl.value = data.invoiceNo; adjustInputWidth(invNoEl); }
+  document.getElementById('ws-dev-input-payment').value = data.paymentMethod;
+
+  document.getElementById('ws-dev-billto-name').value = data.billTo.name || '';
+  document.getElementById('ws-dev-billto-address').value = data.billTo.address || '';
+  document.getElementById('ws-dev-billto-phone').value = data.billTo.phone || '';
+  document.getElementById('ws-dev-billto-email').value = data.billTo.email || '';
+  document.getElementById('ws-dev-billto-vat').value = data.billTo.vatNo || '';
+
+  const tbody = document.getElementById('ws-dev-items-tbody');
+  tbody.innerHTML = '';
+
+  data.items.forEach((item, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'item-row';
+    const grossVal = Number(item.grossPrice || (item.amount ? round2(item.amount * (1 + taxRate/100)) : 0)).toFixed(2);
+    const netVal = Number(item.amount || (item.grossPrice ? round2(item.grossPrice / (1 + taxRate/100)) : 0)).toFixed(2);
+
+    tr.innerHTML = `
+      <td class="row-actions-cell no-print">
+        <div class="row-actions">
+          <button onclick="deleteRow('ws_dev', ${index})" title="Delete" class="text-rose-500 hover:text-rose-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          </button>
+          <button onclick="duplicateRow('ws_dev', ${index})" title="Duplicate" class="text-blue-500 hover:text-blue-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+          </button>
+        </div>
+      </td>
+      <td style="width: 38%;">
+        <input type="text" class="editable-cell-input font-medium" value="${escapeHtml(item.model || item.desc)}"
+               oninput="updateItemField('ws_dev', ${index}, 'model', this.value)" placeholder="Device Model Lot">
+      </td>
+      <td style="width: 20%;">
+        <input type="text" class="editable-cell-input text-teal-800 font-mono text-[10.5px]" value="${escapeHtml(item.specs || 'Grade A')}"
+               oninput="updateItemField('ws_dev', ${index}, 'specs', this.value)" placeholder="Specs / Batch">
+      </td>
+      <td style="width: 10%; text-align: center;">
+        <input type="number" step="1" min="1" class="editable-cell-input text-center mono font-medium"
+               value="${item.qty}" oninput="updateItemCalcField('ws_dev', ${index}, 'qty', this.value)">
+      </td>
+      <td style="width: 16%; text-align: right; white-space: nowrap;">
+        <div class="money-cell">
+          <span class="money-sym">€</span>
+          <span class="print-only money-num" id="ws_dev-printamt-${index}">${netVal}</span>
+          ${isGross ? `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${grossVal}" oninput="updateItemGrossField('ws_dev', ${index}, this.value)" title="Shelf Price Inc VAT">
+          ` : `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${netVal}" oninput="updateItemNetField('ws_dev', ${index}, this.value)" title="Net Price Ex VAT">
+          `}
+        </div>
+        <div class="no-print text-[9px] text-slate-500 font-mono text-right" id="ws_dev-helper-${index}">
+          ${isGross ? `ex VAT: €${netVal}` : `inc VAT: €${grossVal}`}
+        </div>
+      </td>
+      <td style="width: 16%; text-align: right; white-space: nowrap;" id="ws_dev-linetotal-${index}">
+        <div class="money-cell">
+          <span class="money-sym">€</span>
+          <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  updateSummaryDisplays('ws_dev', calc);
+}
+
+// 3. Render Retail Accessories
+function renderRetailAccessories() {
+  const data = state.profiles.rt_acc;
+  const calc = calculateProfileTotals('rt_acc');
+  const isGross = data.pricingMode === 'gross';
+  const taxRate = parseNum(data.taxRate);
+
+  const isGC = data.activeBrand === 'GC';
+  const headerElem = document.getElementById('rt-acc-header-banner');
+  const logoElem = document.getElementById('rt-acc-logo-img');
+  const brandTextElem = document.getElementById('rt-acc-brand-text');
+  const contactTextElem = document.getElementById('rt-acc-header-contact');
+  const noticeContactElem = document.getElementById('rt-acc-notice-contact');
+
+  if (isGC) {
+    headerElem.className = 'banner-rt-acc';
+    logoElem.src = 'assets/buyer-brand.svg';
+    logoElem.className = 'h-9 object-contain drop-shadow-md';
+    brandTextElem.textContent = '';
+    contactTextElem.innerHTML = `
+      <div>Your business address</div>
+      <div>
+        <span>CONTACT: Your phone</span>
+        <span class="sep">•</span>
+        <span>EMAIL: buyer@example.invalid</span>
+        <span class="sep">•</span>
+        <span>VAT: Your tax number</span>
+      </div>
+    `;
+    if (noticeContactElem) noticeContactElem.textContent = 'CONTACT: Your phone    EMAIL: buyer@example.invalid';
+  } else {
+    headerElem.className = 'banner-rt-acc';
+    logoElem.src = 'assets/buyer-brand.svg';
+    logoElem.className = 'h-10 object-contain drop-shadow-md';
+    brandTextElem.textContent = 'Your Business';
+    contactTextElem.innerHTML = `
+      <div>Your business address</div>
+      <div>
+        <span>CONTACT: Your phone</span>
+        <span class="sep">•</span>
+        <span>EMAIL: buyer@example.invalid</span>
+        <span class="sep">•</span>
+        <span>VAT: Your tax number</span>
+      </div>
+    `;
+    if (noticeContactElem) noticeContactElem.textContent = 'CONTACT: Your phone    EMAIL: buyer@example.invalid';
+  }
+
+  const refEl = document.getElementById('rt-acc-input-ref');
+  if (refEl) { refEl.value = data.reference; adjustInputWidth(refEl); }
+  document.getElementById('rt-acc-disp-date').textContent = formatDateDisplay(data.date);
+  document.getElementById('rt-acc-input-date').value = data.date;
+
+  document.getElementById('rt-acc-billfrom-name').value = data.billFrom.name || '';
+  document.getElementById('rt-acc-billfrom-address').value = data.billFrom.address || '';
+  document.getElementById('rt-acc-billfrom-phone').value = data.billFrom.phone || '';
+
+  document.getElementById('rt-acc-billto-name').value = data.billTo.name || '';
+  document.getElementById('rt-acc-billto-email').value = data.billTo.email || '';
+  document.getElementById('rt-acc-billto-phone').value = data.billTo.phone || '';
+
+  const tbody = document.getElementById('rt-acc-items-tbody');
+  tbody.innerHTML = '';
+
+  data.items.forEach((item, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'item-row';
+    const grossVal = Number(item.grossPrice || (item.amount ? round2(item.amount * (1 + taxRate/100)) : 0)).toFixed(2);
+    const netVal = Number(item.amount || (item.grossPrice ? round2(item.grossPrice / (1 + taxRate/100)) : 0)).toFixed(2);
+
+    tr.innerHTML = `
+      <td class="row-actions-cell no-print">
+        <div class="row-actions">
+          <button onclick="deleteRow('rt_acc', ${index})" title="Delete" class="text-rose-500 hover:text-rose-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          </button>
+          <button onclick="duplicateRow('rt_acc', ${index})" title="Duplicate" class="text-blue-500 hover:text-blue-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+          </button>
+        </div>
+      </td>
+      <td style="width: 58%;">
+        <input type="text" class="editable-cell-input font-medium" value="${escapeHtml(item.desc)}"
+               oninput="updateItemField('rt_acc', ${index}, 'desc', this.value)" placeholder="Item Description">
+      </td>
+      <td style="width: 10%; text-align: center;">
+        <input type="number" step="1" min="1" class="editable-cell-input text-center mono font-medium"
+               value="${item.qty}" oninput="updateItemCalcField('rt_acc', ${index}, 'qty', this.value)">
+      </td>
+      <td style="width: 16%; text-align: right; white-space: nowrap;">
+        <div class="money-cell">
+          <span class="money-sym">€</span>
+          <span class="print-only money-num" id="rt_acc-printamt-${index}">${netVal}</span>
+          ${isGross ? `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${grossVal}" oninput="updateItemGrossField('rt_acc', ${index}, this.value)" title="Shelf Price Inc 23% VAT">
+          ` : `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${netVal}" oninput="updateItemNetField('rt_acc', ${index}, this.value)" title="Net Price Ex VAT">
+          `}
+        </div>
+        <div class="no-print text-[9px] text-slate-500 font-mono text-right" id="rt_acc-helper-${index}">
+          ${isGross ? `ex VAT: €${netVal}` : `inc VAT: €${grossVal}`}
+        </div>
+      </td>
+      <td style="width: 16%; text-align: right; white-space: nowrap;" id="rt_acc-linetotal-${index}">
+        <div class="money-cell">
+          <span class="money-sym">€</span>
+          <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  updateSummaryDisplays('rt_acc', calc);
+}
+
+// 4. Render Retail Devices
+function renderRetailDevices() {
+  const data = state.profiles.rt_dev;
+  const calc = calculateProfileTotals('rt_dev');
+  const isGross = data.pricingMode === 'gross';
+  const taxRate = parseNum(data.taxRate);
+
+  const isGC = data.activeBrand === 'GC';
+  const headerElem = document.getElementById('rt-dev-header-banner');
+  const logoElem = document.getElementById('rt-dev-logo-img');
+  const brandTextElem = document.getElementById('rt-dev-brand-text');
+  const contactTextElem = document.getElementById('rt-dev-header-contact');
+
+  if (isGC) {
+    headerElem.className = 'banner-rt-dev';
+    logoElem.src = 'assets/buyer-brand.svg';
+    logoElem.className = 'h-9 object-contain drop-shadow-md';
+    brandTextElem.textContent = '';
+    contactTextElem.innerHTML = `
+      <div>Your business address</div>
+      <div>
+        <span>CONTACT: Your phone</span>
+        <span class="sep">•</span>
+        <span>EMAIL: buyer@example.invalid</span>
+        <span class="sep">•</span>
+        <span>VAT: Your tax number</span>
+      </div>
+    `;
+  } else {
+    headerElem.className = 'banner-rt-dev';
+    logoElem.src = 'assets/buyer-brand.svg';
+    logoElem.className = 'h-10 object-contain drop-shadow-md';
+    brandTextElem.textContent = 'Your Business';
+    contactTextElem.innerHTML = `
+      <div>Your business address</div>
+      <div>
+        <span>CONTACT: Your phone</span>
+        <span class="sep">•</span>
+        <span>EMAIL: buyer@example.invalid</span>
+        <span class="sep">•</span>
+        <span>VAT: Your tax number</span>
+      </div>
+    `;
+  }
+
+  const refEl = document.getElementById('rt-dev-input-ref');
+  if (refEl) { refEl.value = data.reference; adjustInputWidth(refEl); }
+  document.getElementById('rt-dev-disp-date').textContent = formatDateDisplay(data.date);
+  document.getElementById('rt-dev-input-date').value = data.date;
+
+  document.getElementById('rt-dev-billfrom-name').value = data.billFrom.name || '';
+  document.getElementById('rt-dev-billfrom-address').value = data.billFrom.address || '';
+  document.getElementById('rt-dev-billfrom-phone').value = data.billFrom.phone || '';
+
+  document.getElementById('rt-dev-billto-name').value = data.billTo.name || '';
+  document.getElementById('rt-dev-billto-email').value = data.billTo.email || '';
+  document.getElementById('rt-dev-billto-phone').value = data.billTo.phone || '';
+  document.getElementById('rt-dev-billto-address').value = data.billTo.address || '';
+
+  const tbody = document.getElementById('rt-dev-items-tbody');
+  tbody.innerHTML = '';
+
+  data.items.forEach((item, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'item-row';
+    const grossVal = Number(item.grossPrice || (item.amount ? round2(item.amount * (1 + taxRate/100)) : 0)).toFixed(2);
+    const netVal = Number(item.amount || (item.grossPrice ? round2(item.grossPrice / (1 + taxRate/100)) : 0)).toFixed(2);
+
+    let itemDesc = item.desc;
+    if (!itemDesc) {
+      if (item.imei && item.model) {
+        itemDesc = `${item.imei} - ${item.model}`;
+      } else if (item.imei) {
+        itemDesc = item.imei;
+      } else {
+        itemDesc = item.model || '';
+      }
+    }
+
+    tr.innerHTML = `
+      <td class="row-actions-cell no-print">
+        <div class="row-actions">
+          <button onclick="deleteRow('rt_dev', ${index})" title="Delete" class="text-rose-500 hover:text-rose-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          </button>
+          <button onclick="duplicateRow('rt_dev', ${index})" title="Duplicate" class="text-blue-500 hover:text-blue-700 p-0.5">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+          </button>
+        </div>
+      </td>
+      <td style="width: 58%; vertical-align: top;">
+        <textarea rows="2" class="editable-cell-input font-medium text-[11px] resize-none w-full"
+                  style="line-height: 1.35; padding: 2px 4px; overflow: hidden; white-space: normal; word-break: break-word;"
+                  oninput="updateItemField('rt_dev', ${index}, 'desc', this.value)" placeholder="IMEI - Device Name">${escapeHtml(itemDesc)}</textarea>
+      </td>
+      <td style="width: 16%; vertical-align: top;">
+        <input type="text" class="editable-cell-input text-[11px]" value="${escapeHtml(item.grade || 'Brand New')}"
+               oninput="updateItemField('rt_dev', ${index}, 'grade', this.value)" placeholder="Condition Grade">
+      </td>
+      <td style="width: 13%; text-align: right; white-space: nowrap; vertical-align: top;">
+        <div class="money-cell" style="width: 82px;">
+          <span class="money-sym">€</span>
+          <span class="print-only money-num" id="rt_dev-printamt-${index}">${netVal}</span>
+          ${isGross ? `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${grossVal}" oninput="updateItemGrossField('rt_dev', ${index}, this.value)" title="Shelf Price Inc 23% VAT">
+          ` : `
+            <input type="number" step="0.01" min="0" class="money-input no-print"
+                   value="${netVal}" oninput="updateItemNetField('rt_dev', ${index}, this.value)" title="Net Price Ex VAT">
+          `}
+        </div>
+        <div class="no-print text-[9px] text-slate-500 font-mono text-right" id="rt_dev-helper-${index}">
+          ${isGross ? `ex VAT: €${netVal}` : `inc VAT: €${grossVal}`}
+        </div>
+      </td>
+      <td style="width: 13%; text-align: right; white-space: nowrap; vertical-align: top;" id="rt_dev-linetotal-${index}">
+        <div class="money-cell" style="width: 82px;">
+          <span class="money-sym">€</span>
+          <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  updateSummaryDisplays('rt_dev', calc);
+}
+
+// Summary display updater
+function updateSummaryDisplays(profileKey, calc) {
+  if (!calc) calc = calculateProfileTotals(profileKey);
+
+  const subtotalElem = document.getElementById(`${profileKey}-subtotal-val`);
+  const taxrateElem = document.getElementById(`${profileKey}-taxrate-input`);
+  const vatElem = document.getElementById(`${profileKey}-vat-val`);
+  const otherElem = document.getElementById(`${profileKey}-other-input`);
+  const totalElem = document.getElementById(`${profileKey}-totaldue-val`);
+
+  if (subtotalElem) subtotalElem.textContent = Number(calc.subtotal).toFixed(2);
+  if (taxrateElem) taxrateElem.value = Number(calc.taxRate).toFixed(2);
+  if (vatElem) vatElem.textContent = Number(calc.vatAmount).toFixed(2);
+  if (otherElem) otherElem.value = Number(calc.otherCosts).toFixed(2);
+  if (totalElem) totalElem.textContent = Number(calc.totalDue).toFixed(2);
+}
+
+// In place updates
+function updateItemField(profileKey, index, field, value) {
+  const prof = state.profiles[profileKey];
+  if (prof && prof.items[index]) {
+    prof.items[index][field] = value;
+  }
+}
+
+function updateItemNetField(profileKey, index, value) {
+  const prof = state.profiles[profileKey];
+  if (!prof || !prof.items[index]) return;
+  const net = parseNum(value);
+  const taxRate = parseNum(prof.taxRate);
+  const gross = round2(net * (1 + taxRate / 100));
+  prof.items[index].amount = net;
+  prof.items[index].grossPrice = gross;
+
+  const calc = calculateProfileTotals(profileKey);
+  const item = prof.items[index];
+
+  const helper = document.getElementById(`${profileKey}-helper-${index}`);
+  if (helper) helper.textContent = `inc VAT: €${gross.toFixed(2)}`;
+
+  const printAmt = document.getElementById(`${profileKey}-printamt-${index}`);
+  if (printAmt) printAmt.textContent = net.toFixed(2);
+
+  const linetotalCell = document.getElementById(`${profileKey}-linetotal-${index}`);
+  if (linetotalCell) {
+    const widthStyle = profileKey === 'rt_dev' ? 'style="width: 82px;"' : '';
+    linetotalCell.innerHTML = `
+      <div class="money-cell" ${widthStyle}>
+        <span class="money-sym">€</span>
+        <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+      </div>
+    `;
+  }
+
+  updateSummaryDisplays(profileKey, calc);
+}
+
+function updateItemGrossField(profileKey, index, value) {
+  const prof = state.profiles[profileKey];
+  if (!prof || !prof.items[index]) return;
+  const gross = parseNum(value);
+  const taxRate = parseNum(prof.taxRate);
+  const net = round2(gross / (1 + taxRate / 100));
+  prof.items[index].grossPrice = gross;
+  prof.items[index].amount = net;
+
+  const calc = calculateProfileTotals(profileKey);
+  const item = prof.items[index];
+
+  const helper = document.getElementById(`${profileKey}-helper-${index}`);
+  if (helper) helper.textContent = `ex VAT: €${net.toFixed(2)}`;
+
+  const printAmt = document.getElementById(`${profileKey}-printamt-${index}`);
+  if (printAmt) printAmt.textContent = net.toFixed(2);
+
+  const linetotalCell = document.getElementById(`${profileKey}-linetotal-${index}`);
+  if (linetotalCell) {
+    const widthStyle = profileKey === 'rt_dev' ? 'style="width: 82px;"' : '';
+    linetotalCell.innerHTML = `
+      <div class="money-cell" ${widthStyle}>
+        <span class="money-sym">€</span>
+        <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+      </div>
+    `;
+  }
+
+  updateSummaryDisplays(profileKey, calc);
+}
+
+function updateItemCalcField(profileKey, index, field, value) {
+  const prof = state.profiles[profileKey];
+  if (!prof || !prof.items[index]) return;
+  prof.items[index][field] = parseNum(value);
+
+  const calc = calculateProfileTotals(profileKey);
+  const item = prof.items[index];
+  const isGross = prof.pricingMode === 'gross';
+  const taxRate = parseNum(prof.taxRate);
+  const net = Number(item.amount || (item.grossPrice ? round2(item.grossPrice / (1 + taxRate/100)) : 0));
+  const gross = Number(item.grossPrice || (item.amount ? round2(item.amount * (1 + taxRate/100)) : 0));
+
+  const helper = document.getElementById(`${profileKey}-helper-${index}`);
+  if (helper) helper.textContent = isGross ? `ex VAT: €${net.toFixed(2)}` : `inc VAT: €${gross.toFixed(2)}`;
+
+  const printAmt = document.getElementById(`${profileKey}-printamt-${index}`);
+  if (printAmt) printAmt.textContent = net.toFixed(2);
+
+  const linetotalCell = document.getElementById(`${profileKey}-linetotal-${index}`);
+  if (linetotalCell) {
+    const widthStyle = profileKey === 'rt_dev' ? 'style="width: 82px;"' : '';
+    linetotalCell.innerHTML = `
+      <div class="money-cell" ${widthStyle}>
+        <span class="money-sym">€</span>
+        <span class="money-num">${Number(item.lineTotal).toFixed(2)}</span>
+      </div>
+    `;
+  }
+
+  updateSummaryDisplays(profileKey, calc);
+}
+
+function addFromShelfPrice(profileKey) {
+  const inputElem = document.getElementById(profileKey === 'rt_acc' ? 'rt-acc-shelf-calc-input' : 'rt-dev-shelf-calc-input');
+  if (!inputElem) return;
+  const gross = parseNum(inputElem.value);
+  if (gross <= 0) {
+    alert('Please enter a valid shelf price (e.g. 15.00)');
+    return;
+  }
+  const taxRate = parseNum(state.profiles[profileKey].taxRate);
+  const net = round2(gross / (1 + taxRate / 100));
+
+  if (profileKey === 'rt_acc') {
+    addRow('rt_acc', { sku: '00ACC', desc: 'Retail Accessory', qty: 1, grossPrice: gross, amount: net });
+  } else {
+    addRow('rt_dev', { model: 'Retail Device', imei: '', grade: 'Grade A', warranty: '12 Months', qty: 1, grossPrice: gross, amount: net });
+  }
+  inputElem.value = '';
+  showToast(`Added Net €${net.toFixed(2)} (from Shelf €${gross.toFixed(2)})`);
+}
+
+// Add/Delete Row Handlers
+function addRow(profileKey, customItem = null) {
+  const prof = state.profiles[profileKey];
+  if (!prof) return;
+
+  if (customItem) {
+    prof.items.push(JSON.parse(JSON.stringify(customItem)));
+  } else {
+    if (profileKey === 'ws_acc') {
+      prof.items.push({ desc: 'New Wholesale Accessory', qty: 10, amount: 2.50, grossPrice: 3.08 });
+    } else if (profileKey === 'ws_dev') {
+      prof.items.push({ model: 'New Handset Lot', specs: 'Grade A', qty: 5, amount: 150.00, grossPrice: 184.50 });
+    } else if (profileKey === 'rt_acc') {
+      prof.items.push({ sku: 'ACC-NEW', desc: 'New Retail Accessory', qty: 1, grossPrice: 15.00, amount: 12.20 });
+    } else if (profileKey === 'rt_dev') {
+      prof.items.push({ desc: '', model: 'New Retail Device', imei: '', grade: 'Brand New', qty: 1, grossPrice: 100.00, amount: 81.30 });
+    }
+  }
+
+  renderActiveProfile();
+  showToast('Row added');
+}
+
+function deleteRow(profileKey, index) {
+  const prof = state.profiles[profileKey];
+  if (!prof || !prof.items[index]) return;
+  prof.items.splice(index, 1);
+  renderActiveProfile();
+}
+
+function duplicateRow(profileKey, index) {
+  const prof = state.profiles[profileKey];
+  if (!prof || !prof.items[index]) return;
+  prof.items.splice(index + 1, 0, JSON.parse(JSON.stringify(prof.items[index])));
+  renderActiveProfile();
+  showToast('Row duplicated');
+}
+
+function addFromCatalog(catalogKey, index) {
+  const cat = CATALOGS[catalogKey];
+  if (!cat || !cat[index]) return;
+  const item = cat[index];
+
+  if (catalogKey === 'wsAccessories') addRow('ws_acc', item);
+  else if (catalogKey === 'wsDevices') addRow('ws_dev', item);
+  else if (catalogKey === 'rtAccessories') addRow('rt_acc', item);
+  else if (catalogKey === 'rtDevices') addRow('rt_dev', item);
+}
+
+function onStoreSelectChanged(profileKey, storeId) {
+  const store = STORES.find(s => s.id === Number(storeId));
+  if (!store) return;
+
+  if (profileKey.startsWith('rt_')) {
+    state.profiles[profileKey].selectedStoreId = store.id;
+    state.profiles[profileKey].activeBrand = store.brand;
+    state.profiles[profileKey].billFrom = {
+      name: store.name,
+      address: store.address,
+      phone: store.phone,
+      email: store.email
+    };
+    renderActiveProfile();
+    showToast(`Branch selected: ${store.name}`);
+  } else {
+    state.profiles[profileKey].billTo = {
+      name: store.name,
+      address: store.address,
+      phone: store.phone,
+      email: store.email,
+      vatNo: store.vat
+    };
+    renderActiveProfile();
+    showToast(`Customer preset: ${store.name}`);
+  }
+}
+
+function setQuickTaxRate(rate) {
+  const prof = state.profiles[state.activeSub];
+  if (!prof) return;
+  prof.taxRate = Number(rate);
+  renderActiveProfile();
+  showToast(`Tax Rate set to ${rate}%`);
+}
+
+function generateNewInvoiceNumber() {
+  const rand = Math.floor(100000 + Math.random() * 900000);
+  const p = state.activeSub;
+  const prof = state.profiles[p];
+
+  if (p === 'ws_acc') {
+    prof.invoiceNo = String(rand);
+    const el = document.getElementById('ws-acc-input-invoiceno');
+    if (el) { el.value = rand; adjustInputWidth(el); }
+  } else if (p === 'ws_dev') {
+    prof.invoiceNo = `GC-DEV-${rand}`;
+    const el = document.getElementById('ws-dev-input-invoiceno');
+    if (el) { el.value = `GC-DEV-${rand}`; adjustInputWidth(el); }
+  } else if (p === 'rt_acc') {
+    prof.reference = `SALE/POS${rand}`;
+    const el = document.getElementById('rt-acc-input-ref');
+    if (el) { el.value = `SALE/POS${rand}`; adjustInputWidth(el); }
+  } else if (p === 'rt_dev') {
+    prof.reference = `SALE/POS${rand}`;
+    const el = document.getElementById('rt-dev-input-ref');
+    if (el) { el.value = `SALE/POS${rand}`; adjustInputWidth(el); }
+  }
+  showToast(`Generated # ${rand}`);
+}
+
+function resetCurrentInvoice() {
+  if (confirm('Are you sure you want to reset the current invoice?')) {
+    const prof = state.profiles[state.activeSub];
+    prof.items = [];
+    prof.otherCosts = 0;
+    renderActiveProfile();
+    showToast('Invoice cleared');
+  }
+}
+
+// Scanner Handlers
+function setupScannerHandlers() {
+  const dropZone = document.getElementById('scanner-drop-zone');
+  const fileInput = document.getElementById('scanner-file-input');
+
+  if (dropZone && fileInput) {
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('dragover');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files.length > 0) processUploadedFile(e.dataTransfer.files[0]);
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) processUploadedFile(e.target.files[0]);
+    });
+  }
+}
+
+function openScannerModal() {
+  const select = document.getElementById('scanner-target-profile');
+  if (select) select.value = state.activeSub;
+  const m = document.getElementById('scanner-modal');
+  if (m) {
+    m.classList.remove('hidden');
+    m.classList.add('flex');
+  }
+}
+
+function closeScannerModal() {
+  const m = document.getElementById('scanner-modal');
+  if (m) {
+    m.classList.add('hidden');
+    m.classList.remove('flex');
+  }
+}
+
+async function processUploadedFile(file) {
+  const statusElem = document.getElementById('scanner-status');
+  const previewDiv = document.getElementById('scanner-preview-area');
+  const fileNameElem = document.getElementById('scanner-filename');
+
+  if (!file) return;
+
+  fileNameElem.textContent = `${file.name} (${Math.round(file.size / 1024)} KB)`;
+  statusElem.classList.remove('hidden');
+  previewDiv.classList.add('hidden');
+  statusElem.textContent = 'Analyzing document content...';
+
+  try {
+    if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls') || file.name.endsWith('.csv')) {
+      statusElem.textContent = 'Parsing Excel spreadsheet...';
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+          parseTableRows(rows);
+        } catch (err) {
+          statusElem.textContent = 'Error parsing Excel: ' + err.message;
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else if (file.type.startsWith('image/')) {
+      statusElem.textContent = 'Extracting text and prices with AI OCR...';
+      if (typeof Tesseract === 'undefined') {
+        statusElem.textContent = 'OCR library loading... Please wait 2 seconds.';
+        return;
+      }
+
+      const res = await Tesseract.recognize(file, 'eng', {
+        logger: m => {
+          if (m.status === 'recognizing text') {
+            statusElem.textContent = `AI Scanning Photo: ${Math.round(m.progress * 100)}%`;
+          }
+        }
+      });
+
+      statusElem.textContent = 'Text extracted! Identifying invoice rows...';
+      parseOCRText(res.data.text);
+    } else {
+      statusElem.textContent = 'Unsupported format. Please upload JPG/PNG photo or Excel XLSX.';
+    }
+  } catch (err) {
+    statusElem.textContent = 'Failed to process: ' + err.message;
+  }
+}
+
+function parseOCRText(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  const items = [];
+
+  lines.forEach(line => {
+    const priceMatch = line.match(/(?:€|EUR)?\s*(\d+[.,]\d{2})/i) || line.match(/\b(\d+)\s*(?:€|EUR)/i);
+    const qtyMatch = line.match(/\b(\d+)\s*(?:x|pcs|pk|qty)?\b/i);
+
+    if (priceMatch) {
+      const price = parseFloat(priceMatch[1].replace(',', '.'));
+      let qty = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
+      if (qty > 1000) qty = 1;
+
+      let desc = line.replace(priceMatch[0], '').replace(/(?:€|EUR)/gi, '').trim();
+      if (desc.length < 3) desc = 'Scanned Product / Item';
+
+      items.push({
+        desc: desc,
+        qty: qty,
+        grossPrice: price,
+        amount: round2(price / 1.23)
+      });
+    }
+  });
+
+  if (items.length === 0) {
+    lines.slice(0, 8).forEach(l => {
+      items.push({ desc: l, qty: 1, grossPrice: 15.00, amount: 12.20 });
+    });
+  }
+
+  showParsedPreview(items);
+}
+
+function parseTableRows(rows) {
+  const items = [];
+  rows.forEach(row => {
+    if (!row || row.length === 0) return;
+    let desc = '';
+    let qty = 1;
+    let price = 0;
+
+    row.forEach(cell => {
+      if (typeof cell === 'string' && cell.length > 2 && isNaN(cell)) {
+        if (!desc || cell.length > desc.length) desc = cell;
+      } else if (typeof cell === 'number' || (!isNaN(cell) && String(cell).trim() !== '')) {
+        const num = parseFloat(cell);
+        if (num > 0) {
+          if (num % 1 === 0 && num < 100 && qty === 1) qty = num;
+          else price = num;
+        }
+      }
+    });
+
+    if (desc && desc.toLowerCase() !== 'item description' && desc.toLowerCase() !== 'subtotal' && desc.toLowerCase() !== 'total') {
+      if (price === 0) price = 15.00;
+      items.push({
+        desc: desc,
+        qty: qty,
+        grossPrice: price,
+        amount: round2(price / 1.23)
+      });
+    }
+  });
+
+  showParsedPreview(items);
+}
+
+function showParsedPreview(items) {
+  state.scannedItemsBuffer = items;
+  const statusElem = document.getElementById('scanner-status');
+  const previewDiv = document.getElementById('scanner-preview-area');
+  const tbody = document.getElementById('scanner-preview-tbody');
+
+  statusElem.classList.add('hidden');
+  previewDiv.classList.remove('hidden');
+  tbody.innerHTML = '';
+
+  items.forEach((item, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-slate-700/60 text-xs';
+    tr.innerHTML = `
+      <td class="p-2">
+        <input type="text" class="w-full bg-slate-900 border border-slate-700 rounded p-1 text-slate-100" value="${escapeHtml(item.desc)}"
+               oninput="state.scannedItemsBuffer[${index}].desc = this.value">
+      </td>
+      <td class="p-2 text-center" style="width: 70px;">
+        <input type="number" class="w-full bg-slate-900 border border-slate-700 rounded p-1 text-center text-slate-100 mono" value="${item.qty}"
+               oninput="state.scannedItemsBuffer[${index}].qty = parseNum(this.value)">
+      </td>
+      <td class="p-2 text-right" style="width: 100px;">
+        <input type="number" step="0.01" class="w-full bg-slate-900 border border-slate-700 rounded p-1 text-right text-slate-100 mono" value="${Number(item.grossPrice || item.amount).toFixed(2)}"
+               oninput="state.scannedItemsBuffer[${index}].grossPrice = parseNum(this.value); state.scannedItemsBuffer[${index}].amount = round2(parseNum(this.value)/1.23)">
+      </td>
+      <td class="p-2 text-center" style="width: 40px;">
+        <button onclick="deleteBufferRow(${index})" class="text-rose-400 hover:text-rose-300">✕</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function deleteBufferRow(index) {
+  state.scannedItemsBuffer.splice(index, 1);
+  showParsedPreview(state.scannedItemsBuffer);
+}
+
+function parseClipboardText() {
+  const raw = document.getElementById('scanner-clipboard-input').value;
+  if (!raw.trim()) {
+    alert('Please paste some Excel rows or text first.');
+    return;
+  }
+  const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
+  const rows = lines.map(l => l.split(/\t|,/));
+  parseTableRows(rows);
+}
+
+function applyScannedItemsToProfile() {
+  const targetProfile = document.getElementById('scanner-target-profile').value;
+  const prof = state.profiles[targetProfile];
+  if (!prof) return;
+
+  if (state.scannedItemsBuffer.length === 0) {
+    alert('No items found to import.');
+    return;
+  }
+
+  state.scannedItemsBuffer.forEach(it => {
+    if (targetProfile === 'ws_acc') {
+      prof.items.push({ desc: it.desc, qty: it.qty || 1, amount: it.amount || round2(it.grossPrice / 1.23) });
+    } else if (targetProfile === 'ws_dev') {
+      prof.items.push({ model: it.desc, specs: 'Grade A', qty: it.qty || 1, amount: it.amount || round2(it.grossPrice / 1.23) });
+    } else if (targetProfile === 'rt_dev') {
+      prof.items.push({ model: it.desc, imei: '', grade: 'Grade A', warranty: '12 Months', qty: it.qty || 1, grossPrice: it.grossPrice || round2(it.amount * 1.23) });
+    } else {
+      prof.items.push({ sku: '00ACC', desc: it.desc, qty: it.qty || 1, grossPrice: it.grossPrice || round2(it.amount * 1.23) });
+    }
+  });
+
+  const mainCat = targetProfile.startsWith('ws_') ? 'wholesale' : 'retail';
+  switchHierarchy(mainCat, targetProfile);
+  closeScannerModal();
+  showToast(`✨ Imported ${state.scannedItemsBuffer.length} items!`);
+}
+
+// Storage History
+function saveCurrentInvoice() {
+  const p = state.activeSub;
+  const prof = state.profiles[p];
+  const calc = calculateProfileTotals(p);
+  const invoiceNo = String(prof.invoiceNo || prof.reference || 'INV-' + Math.floor(100000 + Math.random() * 900000)).trim();
+  const clientName = prof.billTo?.name || 'Customer';
+
+  // Check if an invoice with same number & subcategory already exists in saved drafts
+  const existingIndex = state.savedInvoices.findIndex(r =>
+    r.subCat === p && String(r.invoiceNo).trim().toLowerCase() === invoiceNo.toLowerCase()
+  );
+
+  const record = {
+    id: existingIndex >= 0 ? state.savedInvoices[existingIndex].id : ('INV_' + Date.now()),
+    mainCat: state.activeMain,
+    subCat: p,
+    invoiceNo: invoiceNo,
+    clientName: clientName,
+    date: prof.date,
+    total: calc.totalDue,
+    data: JSON.parse(JSON.stringify(prof)),
+    timestamp: new Date().toISOString()
+  };
+
+  if (existingIndex >= 0) {
+    state.savedInvoices[existingIndex] = record;
+    showToast(`Updated existing draft: #${invoiceNo}`);
+  } else {
+    state.savedInvoices.unshift(record);
+    showToast(`Saved new draft: #${invoiceNo}`);
+  }
+
+  localStorage.setItem('classic_vat_history_v3', JSON.stringify(state.savedInvoices));
+  renderSavedInvoicesModal();
+}
+
+function loadSavedInvoicesFromStorage() {
+  try {
+    const raw = localStorage.getItem('classic_vat_history_v3');
+    if (raw) state.savedInvoices = JSON.parse(raw);
+  } catch (e) {
+    console.error('History error:', e);
+  }
+}
+
+function loadInvoiceRecord(id) {
+  const rec = state.savedInvoices.find(r => r.id === id);
+  if (!rec) return;
+
+  state.profiles[rec.subCat] = JSON.parse(JSON.stringify(rec.data));
+  switchHierarchy(rec.mainCat || (rec.subCat.startsWith('ws_') ? 'wholesale' : 'retail'), rec.subCat);
+  closeSavedModal();
+  showToast(`Loaded invoice ${rec.invoiceNo}`);
+}
+
+function deleteSavedInvoiceRecord(id, e) {
+  if (e) e.stopPropagation();
+  state.savedInvoices = state.savedInvoices.filter(r => r.id !== id);
+  localStorage.setItem('classic_vat_history_v3', JSON.stringify(state.savedInvoices));
+  renderSavedInvoicesModal();
+  showToast('Invoice deleted from history');
+}
+
+function getInvoiceFormattedName() {
+  const p = state.activeSub;
+  const prof = state.profiles[p];
+
+  let storeName = '';
+  let customerName = '';
+
+  if (p === 'rt_acc') {
+    storeName = document.getElementById('rt-acc-billfrom-name')?.value || prof.billFrom?.name || 'Thurles';
+    customerName = document.getElementById('rt-acc-billto-name')?.value || prof.billTo?.name || 'Customer';
+  } else if (p === 'rt_dev') {
+    storeName = document.getElementById('rt-dev-billfrom-name')?.value || prof.billFrom?.name || 'Thurles';
+    customerName = document.getElementById('rt-dev-billto-name')?.value || prof.billTo?.name || 'Customer';
+  } else if (p === 'ws_acc') {
+    storeName = 'Your Business';
+    customerName = document.getElementById('ws-acc-billto-name')?.value || prof.billTo?.name || 'Customer';
+  } else if (p === 'ws_dev') {
+    storeName = 'Your Business';
+    customerName = document.getElementById('ws-dev-billto-name')?.value || prof.billTo?.name || 'Customer';
+  }
+
+  // Extract clean store name (e.g. "Your Business – Thurles" -> "Thurles")
+  let cleanStore = storeName.trim();
+  if (typeof STORES !== 'undefined' && Array.isArray(STORES)) {
+    for (const s of STORES) {
+      if (cleanStore.toLowerCase().includes(s.name.toLowerCase()) ||
+          cleanStore.toLowerCase().includes(s.city.split(',')[0].toLowerCase())) {
+        cleanStore = s.city.split(',')[0].trim();
+        break;
+      }
+    }
+  }
+
+  cleanStore = cleanStore.replace(/^I\s*Digital\s*Fun\s*[-–—]?\s*/i, '').trim();
+  cleanStore = cleanStore.replace(/\s*\([^)]*\)$/, '').trim();
+  if (!cleanStore) cleanStore = storeName.trim() || 'Store';
+
+  let cleanCustomer = customerName.trim() || 'Customer';
+
+  return `VAT Invoice (${cleanStore}) - ${cleanCustomer}`;
+}
+
+function exportInvoiceCSV() {
+  const p = state.activeSub;
+  const prof = state.profiles[p];
+  const calc = calculateProfileTotals(p);
+  const fileName = getInvoiceFormattedName();
+
+  let csv = 'Item Description,Quantity,Amount (EUR),Total (EUR)\r\n';
+  prof.items.forEach(it => {
+    const title = it.model || it.desc || 'Item';
+    csv += `"${title.replace(/"/g, '""')}",${it.qty || 1},${Number(it.amount || it.grossPrice || 0).toFixed(2)},${Number(it.lineTotal || 0).toFixed(2)}\r\n`;
+  });
+  csv += `\r\nSubtotal,,,${calc.subtotal.toFixed(2)}\r\n`;
+  csv += `Tax Rate (%),,,${calc.taxRate.toFixed(2)}%\r\n`;
+  csv += `VAT Amount,,,${calc.vatAmount.toFixed(2)}\r\n`;
+  csv += `Other Costs,,,${calc.otherCosts.toFixed(2)}\r\n`;
+  csv += `Total Due,,,${calc.totalDue.toFixed(2)}\r\n`;
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${fileName}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Exported CSV');
+}
+
+function exportInvoiceJSON() {
+  const p = state.activeSub;
+  const prof = state.profiles[p];
+  const fileName = getInvoiceFormattedName();
+  const jsonStr = JSON.stringify({ mainCat: state.activeMain, subCat: p, exportedAt: new Date(), ...prof }, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${fileName}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Exported JSON');
+}
+
+function importInvoiceJSON(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const obj = JSON.parse(e.target.result);
+      const targetSub = obj.subCat || 'ws_acc';
+      state.profiles[targetSub] = { ...state.profiles[targetSub], ...obj };
+      switchHierarchy(obj.mainCat || (targetSub.startsWith('ws_') ? 'wholesale' : 'retail'), targetSub);
+      showToast('Invoice imported successfully!');
+    } catch (err) {
+      alert('Invalid JSON file');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function triggerPrint() {
+  const originalTitle = document.title;
+  const pdfName = getInvoiceFormattedName();
+
+  document.title = pdfName;
+  window.print();
+
+  setTimeout(() => {
+    document.title = originalTitle;
+  }, 1200);
+}
+
+function showToast(msg) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = 'toast-msg';
+  toast.innerHTML = `
+    <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+    <span>${escapeHtml(msg)}</span>
+  `;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+    toast.style.transition = 'all 0.25s ease';
+    setTimeout(() => toast.remove(), 250);
+  }, 2400);
+}
+
+function openSavedModal() {
+  renderSavedInvoicesModal();
+  const m = document.getElementById('saved-invoices-modal');
+  if (m) {
+    m.classList.remove('hidden');
+    m.classList.add('flex');
+  }
+}
+
+function closeSavedModal() {
+  const m = document.getElementById('saved-invoices-modal');
+  if (m) {
+    m.classList.add('hidden');
+    m.classList.remove('flex');
+  }
+}
+
+function renderSavedInvoicesModal() {
+  const list = document.getElementById('saved-invoices-list');
+  if (!list) return;
+
+  if (state.savedInvoices.length === 0) {
+    list.innerHTML = '<div class="text-center text-gray-400 py-8 text-sm">No saved invoices yet. Click "Save Draft" to save.</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+  state.savedInvoices.forEach(inv => {
+    const div = document.createElement('div');
+    div.className = 'flex items-center justify-between p-3 bg-slate-800 hover:bg-slate-700/80 rounded-lg cursor-pointer transition border border-slate-700';
+    div.onclick = () => loadInvoiceRecord(inv.id);
+    div.innerHTML = `
+      <div class="flex items-center gap-3">
+        <span class="px-2 py-0.5 text-xs font-semibold rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 uppercase">
+          ${inv.subCat.replace('_', ' ')}
+        </span>
+        <div>
+          <div class="font-semibold text-white text-sm">${escapeHtml(inv.invoiceNo)} - ${escapeHtml(inv.clientName)}</div>
+          <div class="text-xs text-slate-400">${inv.date} • Total: ${formatEuro(inv.total)}</div>
+        </div>
+      </div>
+      <button onclick="deleteSavedInvoiceRecord('${inv.id}', event)" title="Delete" class="text-slate-400 hover:text-rose-400 p-1.5 rounded hover:bg-slate-600/50">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+      </button>
+    `;
+    list.appendChild(div);
+  });
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+// Event Listeners
+function setupEventListeners() {
+  // Wholesale Accessories
+  document.getElementById('ws-acc-input-date')?.addEventListener('change', (e) => {
+    state.profiles.ws_acc.date = e.target.value;
+    document.getElementById('ws-acc-disp-date').textContent = formatDateDisplay(e.target.value);
+  });
+  document.getElementById('ws-acc-input-invoiceno')?.addEventListener('input', (e) => { state.profiles.ws_acc.invoiceNo = e.target.value; adjustInputWidth(e.target); });
+  document.getElementById('ws-acc-input-payment')?.addEventListener('input', (e) => { state.profiles.ws_acc.paymentMethod = e.target.value; });
+  document.getElementById('ws-acc-billto-name')?.addEventListener('input', (e) => { state.profiles.ws_acc.billTo.name = e.target.value; });
+  document.getElementById('ws-acc-billto-address')?.addEventListener('input', (e) => { state.profiles.ws_acc.billTo.address = e.target.value; });
+  document.getElementById('ws-acc-billto-phone')?.addEventListener('input', (e) => { state.profiles.ws_acc.billTo.phone = e.target.value; });
+  document.getElementById('ws-acc-billto-email')?.addEventListener('input', (e) => { state.profiles.ws_acc.billTo.email = e.target.value; });
+  document.getElementById('ws-acc-billto-vat')?.addEventListener('input', (e) => { state.profiles.ws_acc.billTo.vatNo = e.target.value; });
+  document.getElementById('ws_acc-taxrate-input')?.addEventListener('input', (e) => { state.profiles.ws_acc.taxRate = parseNum(e.target.value); updateSummaryDisplays('ws_acc'); });
+  document.getElementById('ws_acc-other-input')?.addEventListener('input', (e) => { state.profiles.ws_acc.otherCosts = parseNum(e.target.value); updateSummaryDisplays('ws_acc'); });
+
+  // Wholesale Devices
+  document.getElementById('ws-dev-input-date')?.addEventListener('change', (e) => {
+    state.profiles.ws_dev.date = e.target.value;
+    document.getElementById('ws-dev-disp-date').textContent = formatDateDisplay(e.target.value);
+  });
+  document.getElementById('ws-dev-input-invoiceno')?.addEventListener('input', (e) => { state.profiles.ws_dev.invoiceNo = e.target.value; adjustInputWidth(e.target); });
+  document.getElementById('ws-dev-input-payment')?.addEventListener('input', (e) => { state.profiles.ws_dev.paymentMethod = e.target.value; });
+  document.getElementById('ws-dev-billto-name')?.addEventListener('input', (e) => { state.profiles.ws_dev.billTo.name = e.target.value; });
+  document.getElementById('ws-dev-billto-address')?.addEventListener('input', (e) => { state.profiles.ws_dev.billTo.address = e.target.value; });
+  document.getElementById('ws-dev-billto-phone')?.addEventListener('input', (e) => { state.profiles.ws_dev.billTo.phone = e.target.value; });
+  document.getElementById('ws-dev-billto-email')?.addEventListener('input', (e) => { state.profiles.ws_dev.billTo.email = e.target.value; });
+  document.getElementById('ws-dev-billto-vat')?.addEventListener('input', (e) => { state.profiles.ws_dev.billTo.vatNo = e.target.value; });
+  document.getElementById('ws_dev-taxrate-input')?.addEventListener('input', (e) => { state.profiles.ws_dev.taxRate = parseNum(e.target.value); updateSummaryDisplays('ws_dev'); });
+  document.getElementById('ws_dev-other-input')?.addEventListener('input', (e) => { state.profiles.ws_dev.otherCosts = parseNum(e.target.value); updateSummaryDisplays('ws_dev'); });
+
+  // Retail Accessories
+  document.getElementById('rt-acc-input-date')?.addEventListener('change', (e) => {
+    state.profiles.rt_acc.date = e.target.value;
+    document.getElementById('rt-acc-disp-date').textContent = formatDateDisplay(e.target.value);
+  });
+  document.getElementById('rt-acc-input-ref')?.addEventListener('input', (e) => { state.profiles.rt_acc.reference = e.target.value; adjustInputWidth(e.target); });
+  document.getElementById('rt-acc-billfrom-name')?.addEventListener('input', (e) => { state.profiles.rt_acc.billFrom.name = e.target.value; });
+  document.getElementById('rt-acc-billfrom-address')?.addEventListener('input', (e) => { state.profiles.rt_acc.billFrom.address = e.target.value; });
+  document.getElementById('rt-acc-billfrom-phone')?.addEventListener('input', (e) => { state.profiles.rt_acc.billFrom.phone = e.target.value; });
+  document.getElementById('rt-acc-billto-name')?.addEventListener('input', (e) => { state.profiles.rt_acc.billTo.name = e.target.value; });
+  document.getElementById('rt-acc-billto-email')?.addEventListener('input', (e) => { state.profiles.rt_acc.billTo.email = e.target.value; });
+  document.getElementById('rt-acc-billto-phone')?.addEventListener('input', (e) => { state.profiles.rt_acc.billTo.phone = e.target.value; });
+  document.getElementById('rt_acc-taxrate-input')?.addEventListener('input', (e) => { state.profiles.rt_acc.taxRate = parseNum(e.target.value); renderRetailAccessories(); });
+  document.getElementById('rt_acc-other-input')?.addEventListener('input', (e) => { state.profiles.rt_acc.otherCosts = parseNum(e.target.value); updateSummaryDisplays('rt_acc'); });
+
+  // Retail Devices
+  document.getElementById('rt-dev-input-date')?.addEventListener('change', (e) => {
+    state.profiles.rt_dev.date = e.target.value;
+    document.getElementById('rt-dev-disp-date').textContent = formatDateDisplay(e.target.value);
+  });
+  document.getElementById('rt-dev-input-ref')?.addEventListener('input', (e) => { state.profiles.rt_dev.reference = e.target.value; adjustInputWidth(e.target); });
+  document.getElementById('rt-dev-billfrom-name')?.addEventListener('input', (e) => { state.profiles.rt_dev.billFrom.name = e.target.value; });
+  document.getElementById('rt-dev-billfrom-address')?.addEventListener('input', (e) => { state.profiles.rt_dev.billFrom.address = e.target.value; });
+  document.getElementById('rt-dev-billfrom-phone')?.addEventListener('input', (e) => { state.profiles.rt_dev.billFrom.phone = e.target.value; });
+  document.getElementById('rt-dev-billto-name')?.addEventListener('input', (e) => { state.profiles.rt_dev.billTo.name = e.target.value; });
+  document.getElementById('rt-dev-billto-email')?.addEventListener('input', (e) => { state.profiles.rt_dev.billTo.email = e.target.value; });
+  document.getElementById('rt-dev-billto-phone')?.addEventListener('input', (e) => { state.profiles.rt_dev.billTo.phone = e.target.value; });
+  document.getElementById('rt-dev-billto-address')?.addEventListener('input', (e) => { state.profiles.rt_dev.billTo.address = e.target.value; });
+  document.getElementById('rt_dev-taxrate-input')?.addEventListener('input', (e) => { state.profiles.rt_dev.taxRate = parseNum(e.target.value); renderRetailDevices(); });
+  document.getElementById('rt_dev-other-input')?.addEventListener('input', (e) => { state.profiles.rt_dev.otherCosts = parseNum(e.target.value); updateSummaryDisplays('rt_dev'); });
+
+  window.addEventListener('beforeprint', () => {
+    window._prevDocTitle = document.title;
+    document.title = getInvoiceFormattedName();
+  });
+
+  window.addEventListener('afterprint', () => {
+    if (window._prevDocTitle) {
+      document.title = window._prevDocTitle;
+    }
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+      e.preventDefault();
+      triggerPrint();
+    }
+  });
+}
