@@ -1,19 +1,50 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>VAT Invoice Generator</title><link rel="stylesheet" href="style.css"><script defer src="invoice.js"></script>
-<body><header class="toolbar"><strong>VAT Invoice Generator</strong><div><a class="button" id="demoLink" href="?demo=1">Live demo</a> <button id="example">Load example</button> <button id="new">New invoice</button> <a class="button" href="#preview">Preview</a> <button id="print" class="primary">Print / Save PDF</button></div></header>
-<aside id="demoNotice" class="demo-notice" hidden><div><strong>Try a sample invoice</strong><p>Change a price, discount or VAT rate to see the totals update. You can print or save the example as a PDF.</p></div><a class="button" id="workspace" href="./">Open my invoice workspace</a></aside>
-<main><form id="editor"><h1>Edit invoice</h1>
-<fieldset><legend>Business &amp; header</legend>
-<label>Invoice heading<input name="heading" required maxlength="80"></label>
-<label>Business name<input name="seller" required maxlength="120"></label>
-<label>Business address<textarea name="sellerAddress" required></textarea></label>
-<div class="fields"><label>VAT registration number<input name="sellerTax" required></label><label>Contact email<input name="email" type="email"></label></div>
-<label>Upload logo<input id="logo" type="file" accept="image/png,image/jpeg,image/webp"></label><button type="button" id="removeLogo">Remove logo</button>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VAT Invoice Generator</title><link rel="stylesheet" href="style.css"><script defer src="invoice.js"></script>
+</head>
+<body>
+<header class="toolbar"><a class="brand" href="./"><span class="brand-icon" aria-hidden="true">▤</span> Invoice Studio</a>
+<div class="toolbar-actions"><button id="history" type="button">Saved invoices</button><button id="new" type="button">New invoice</button><a id="demoLink" class="button" href="?demo=1">Try demo</a></div></header>
+<main>
+<div class="intro"><div><h1>VAT Invoice Generator</h1><p id="status" role="status">Drafts save in this browser.</p></div>
+<div class="actions"><a class="button preview-jump" href="#preview">Preview</a><button id="saveInvoice" type="button">Save invoice</button><button id="print" class="primary" type="button">Print / Save PDF</button></div></div>
+<aside id="demoNotice" class="demo-notice" hidden><div><strong>Sample workspace</strong><p>Try the editor or export a sample PDF. Your own invoices have a separate workspace.</p></div><div class="actions"><button id="example" class="secondary" type="button">Reset example</button><a class="button" id="workspace" href="./">Use my company details</a></div></aside>
+<div class="workspace">
+<section id="editorPane" aria-label="Invoice editor">
+<nav class="steps" aria-label="Invoice sections"><button data-step="details" type="button" aria-pressed="true">Details</button><button data-step="items" type="button" aria-pressed="false">Items</button><button data-step="payment" type="button" aria-pressed="false">Payment</button></nav>
+<form id="editor">
+<div id="detailsPanel" data-panel="details">
+<fieldset><legend>Company details</legend>
+<label>Company name<input name="seller" required maxlength="120" autocomplete="organization"></label>
+<label>Company address<textarea name="sellerAddress" required maxlength="500"></textarea></label>
+<div class="fields"><label>VAT number<input name="sellerTax" required maxlength="40"></label><label>Contact email<input name="email" type="email" maxlength="120"></label></div>
+<div class="fields"><label>Invoice heading<input name="heading" required maxlength="80"></label><label>Brand colour<input name="accent" type="color"></label></div>
+<label>Company logo<input id="logo" type="file" accept="image/png,image/jpeg,image/webp"></label>
+<div class="actions"><button type="button" id="company">Use for future invoices</button><button type="button" id="removeLogo">Remove logo</button></div>
 </fieldset>
 <fieldset><legend>Customer &amp; dates</legend>
-<label>Customer name<input name="buyer" required></label><label>Customer address<textarea name="buyerAddress" required></textarea></label><label>Customer VAT number<input name="buyerTax"></label>
-<div class="fields"><label>Invoice number<input name="number" required></label><label>Issue date<input name="issued" type="date" required></label><label>Supply date<input name="supply" type="date"></label><label>Payment due<input name="due" type="date"></label></div></fieldset>
-<fieldset><legend>Items and VAT</legend><label>Default VAT %<input name="vat" type="number" min="0" max="100" step="0.01" required></label><div id="items"></div><button type="button" id="add">Add item</button></fieldset>
-<fieldset><legend>Payment details</legend><label>Terms and notes<textarea name="notes"></textarea></label></fieldset>
-<p id="status" role="status">Draft saved in this browser. Amounts in EUR.</p>
-</form><section id="preview" aria-label="Invoice preview"></section></main></body></html>
+<label>Customer name<input name="buyer" required maxlength="120"></label><label>Customer address<textarea name="buyerAddress" required maxlength="500"></textarea></label>
+<div class="fields"><label>Customer VAT number<input name="buyerTax" maxlength="40"></label><label>PO / reference<input name="reference" maxlength="80"></label>
+<label>Invoice number<input name="number" required maxlength="45"></label><label>Issue date<input name="issued" type="date" required></label><label>Supply date<input name="supply" type="date"></label><label>Payment due<input name="due" type="date"></label></div></fieldset>
+<button type="button" data-next="items" class="primary">Continue to items</button>
+</div>
+<div data-panel="items" hidden><fieldset><legend>Line items</legend>
+<div class="fields"><label>Default VAT %<input name="vat" type="number" min="0" max="100" step="0.01" required></label><p class="hint">Applies to new items. Set each line’s VAT rate below.</p></div>
+<div id="items"></div><button type="button" id="add">+ Add item</button></fieldset>
+<button type="button" data-next="payment" class="primary">Continue to payment</button></div>
+<div data-panel="payment" hidden><fieldset><legend>Payment details</legend>
+<div class="fields"><label>Amount received (€)<input name="paid" type="number" min="0" step="0.01" max="100000000" required></label><label>Payment received on<input name="paidDate" type="date"></label></div>
+<label>Payment instructions<textarea name="payment" maxlength="600" placeholder="Bank details, transfer reference or another way to pay"></textarea></label>
+<label>Terms and notes<textarea name="notes" maxlength="600"></textarea></label>
+<p class="hint">You can save a draft anytime. Check the final details before printing.</p>
+</fieldset><a class="button" href="#preview">View invoice preview</a></div>
+</form></section>
+<section class="preview-pane"><div class="preview-label"><strong>Invoice preview</strong><span>EUR · A4</span></div><div id="preview" aria-label="Invoice preview"></div></section>
+</div>
+</main>
+<dialog id="historyDialog" aria-labelledby="historyTitle"><header class="dialog-head"><h2 id="historyTitle">Saved invoices</h2><button id="closeHistory" type="button">Close</button></header>
+<label>Find by invoice number or customer<input id="historySearch" type="search"></label><div id="historyList"></div></dialog>
+</body>
+</html>
