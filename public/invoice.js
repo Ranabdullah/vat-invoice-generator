@@ -10,9 +10,9 @@ const dateString = date => new Intl.DateTimeFormat('sv-SE').format(date);
 const today = () => dateString(new Date());
 const blank = () => ({
   heading:'VAT Invoice', seller:'', sellerAddress:'', sellerTax:'', email:'',
-  buyer:'', buyerAddress:'', buyerTax:'', reference:'', number:'INV-0001',
+  buyer:'', buyerAddress:'', buyerTax:'', buyerEmail:'', reference:'', number:'INV-0001',
   issued:today(), supply:'', due:'', paid:0, paidDate:'', payment:'', vat:23,
-  notes:'', logo:'', accent:'#254fc4', lines:[blankLine(23)], archiveId:null
+  notes:'', logo:'', cover:'', template:'standard', priceMode:'net', accent:'#254fc4', lines:[blankLine(23)], archiveId:null
 });
 function example() {
   const due = new Date();
@@ -36,8 +36,12 @@ const saved = read('', null);
 let draft = saved && Array.isArray(saved.lines) && saved.lines.length ? {...start, ...saved} : start;
 let archive = read('-archive', []);
 if (!Array.isArray(archive)) archive = [];
-const companyFields = ['seller','sellerAddress','sellerTax','email','heading','accent','logo','vat','payment'];
-const fields = Object.keys(blank()).filter(name => name !== 'logo' && form.elements.namedItem(name));
+const companyFields = ['seller','sellerAddress','sellerTax','email','heading','accent','logo','cover','template','priceMode','vat','payment'];
+const fields = Object.keys(blank()).filter(name => !['logo','cover'].includes(name) && form.elements.namedItem(name));
+const templateLabels = {
+  standard:'VAT Invoice', 'ws-accessories':'Wholesale Accessories Invoice', 'ws-devices':'Wholesale Devices Invoice',
+  'rt-accessories':'Retail Accessories Invoice', 'rt-devices':'Retail Devices Invoice'
+};
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 const money = new Intl.NumberFormat('en-IE', {style:'currency', currency:'EUR'});
 const euros = cents => money.format(cents / 100);
@@ -66,7 +70,7 @@ for (const button of form.querySelectorAll('[data-next]')) button.onclick = () =
 
 function renderItems() {
   const numeric = [
-    ['quantity','Quantity',0.001,1000000,0.001], ['price','Unit price excl. VAT',0,1000000,0.01],
+    ['quantity','Quantity',0.001,1000000,0.001], ['price',draft.priceMode==='gross'?'Unit price incl. VAT':'Unit price excl. VAT',0,1000000,0.01],
     ['discount','Discount %',0,100,0.01], ['vat','VAT %',0,100,0.01]
   ];
   items.innerHTML = draft.lines.map((line,index) => `<div class="line" data-index="${index}">
@@ -76,20 +80,22 @@ function renderItems() {
   </div>`).join('');
 }
 const scaled = (value, factor, max) => BigInt(Math.round(Math.max(0, Math.min(max, Number(value) || 0)) * factor));
-function lineAmounts(item) {
+function lineAmounts(item,mode) {
   const rate = scaled(item.vat,100,100);
   const discount = 10000n - scaled(item.discount,100,100);
   const units = scaled(item.quantity,1000,1000000);
   const price = scaled(item.price,100,1000000);
-  const net = (units * price * discount + 5000000n) / 10000000n;
-  const tax = (net * rate + 5000n) / 10000n;
+  const raw=units*price*discount;
+  const denominator=mode==='gross'?10000000n+rate*1000n:10000000n;
+  const net=(raw+denominator/2n)/denominator;
+  const tax=mode==='gross'?(raw+5000000n)/10000000n-net:(net*rate+5000n)/10000n;
   return {net:Number(net), tax:Number(tax), rate:Number(rate)/100};
 }
-function totals(lines) {
+function totals(lines,mode) {
   const byRate = new Map();
   let net = 0, tax = 0;
   const breakdown = lines.map(item => {
-    const row = lineAmounts(item);
+    const row = lineAmounts(item,mode);
     const bucket = byRate.get(row.rate) || {net:0,tax:0};
     bucket.net += row.net;
     bucket.tax += row.tax;
@@ -105,7 +111,7 @@ function displayDate(date) {
   return Number.isFinite(parsed.getTime()) ? new Intl.DateTimeFormat('en-IE',{dateStyle:'medium'}).format(parsed) : date;
 }
 function renderPreview() {
-  const {net,tax,byRate,breakdown,gross} = totals(draft.lines);
+  const {net,tax,byRate,breakdown,gross} = totals(draft.lines,draft.priceMode);
   const paid = Number(scaled(draft.paid,100,100000000));
   const e = name => escape(draft[name]);
   const logo = validLogo(draft.logo) ? `<img alt="Company logo" src="${draft.logo}">` :
@@ -123,13 +129,13 @@ function renderPreview() {
   const details = [['issued','Issued'],['supply','Supplied'],['due','Due'],['reference','PO / reference']];
   if (paid && draft.paidDate) details.push(['paidDate','Payment received']);
   const sample = demo || /^DEMO-/.test(draft.number);
-  preview.innerHTML = `<header class="invoice-head"><div class="invoice-company">${logo}<strong>${e('seller') || 'Your company'}</strong></div>
+  preview.innerHTML = `${validLogo(draft.cover)?`<img class="invoice-cover" alt="" src="${draft.cover}">`:''}<header class="invoice-head"><div class="invoice-company">${logo}<strong>${e('seller') || 'Your company'}</strong></div>
     <div class="invoice-heading"><h2>${e('heading') || 'VAT Invoice'}</h2><span>${e('number')}</span></div></header>
     ${sample ? '<span class="sample-label">Sample invoice</span>' : ''}
     <div class="dates">${details.filter(([name])=>draft[name]).map(([name,label])=>`<div><strong>${label}</strong>${name==='reference' ? e(name) : escape(displayDate(draft[name]))}</div>`).join('')}</div>
     <div class="parties"><section><strong>Billed from</strong><p>${[draft.sellerAddress,draft.sellerTax && 'VAT '+draft.sellerTax,draft.email].filter(Boolean).map(escape).join('\n')}</p></section>
-    <section><strong>Billed to</strong><p>${[draft.buyer,draft.buyerAddress,draft.buyerTax && 'VAT '+draft.buyerTax].filter(Boolean).map(escape).join('\n') || 'Customer details'}</p></section></div>
-    <div class="table-wrap"><table aria-label="Invoice lines"><thead><tr><th>Item</th><th>Qty</th><th>Unit net</th><th>Discount</th><th>VAT rate</th><th>Net</th><th>Total</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
+    <section><strong>Billed to</strong><p>${[draft.buyer,draft.buyerAddress,draft.buyerEmail,draft.buyerTax && 'VAT '+draft.buyerTax].filter(Boolean).map(escape).join('\n') || 'Customer details'}</p></section></div>
+    <div class="table-wrap"><table aria-label="Invoice lines"><thead><tr><th>Item</th><th>Qty</th><th>${draft.priceMode==='gross'?'Unit gross':'Unit net'}</th><th>Discount</th><th>VAT rate</th><th>Net</th><th>Total</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
     <div class="summary"><section><h3>VAT breakdown</h3><table aria-label="VAT by rate"><thead><tr><th>Rate</th><th>Net</th><th>VAT</th></tr></thead><tbody>
     ${[...byRate].sort(([a],[b])=>a-b).map(([rate,row])=>`<tr><td>${rate}%</td><td>${euros(row.net)}</td><td>${euros(row.tax)}</td></tr>`).join('')}</tbody></table></section>
     <dl><div><dt>Subtotal</dt><dd>${euros(net)}</dd></div><div><dt>Total VAT</dt><dd>${euros(tax)}</dd></div>
@@ -145,7 +151,9 @@ function renderPreview() {
 function refresh() {
   for (const name of fields) form.elements[name].value = draft[name] ?? '';
   $('#logo').value = '';
+  $('#cover').value = '';
   $('#removeLogo').disabled = !validLogo(draft.logo);
+  $('#removeCover').disabled = !validLogo(draft.cover);
   renderItems();
   renderPreview();
   saveDraft();
@@ -153,6 +161,16 @@ function refresh() {
 form.addEventListener('submit', event => event.preventDefault());
 form.addEventListener('input', event => {
   const input = event.target;
+  if(input.name==='template'){
+    if(draft.heading===templateLabels[draft.template]) draft.heading=templateLabels[input.value];
+    draft.template=input.value;
+    refresh();
+    return;
+  }
+  if(input.name==='priceMode'){
+    draft.priceMode=input.value;
+    renderItems();
+  }
   if (fields.includes(input.name)) draft[input.name] = input.value;
   else if (input.dataset.field) draft.lines[Number(input.closest('.line').dataset.index)][input.dataset.field] = input.value;
   else return;
@@ -171,7 +189,7 @@ $('#add').onclick = () => {
   refresh();
   items.lastElementChild.querySelector('input').focus();
 };
-$('#logo').onchange = event => {
+function loadBrandImage(event,field) {
   const file = event.target.files[0];
   if (!file) return;
   if (file.size>1000000 || !['image/png','image/jpeg','image/webp'].includes(file.type)) {
@@ -183,13 +201,28 @@ $('#logo').onchange = event => {
   const reader = new FileReader();
   reader.onload = () => {
     if (target!==draft || event.target.files[0]!==file) return;
-    draft.logo = reader.result;
+    draft[field] = reader.result;
     refresh();
   };
   reader.onerror = () => status('The selected logo could not be read.');
   reader.readAsDataURL(file);
-};
+}
+$('#logo').onchange = event => loadBrandImage(event,'logo');
+$('#cover').onchange = event => loadBrandImage(event,'cover');
 $('#removeLogo').onclick = () => { draft.logo=''; refresh(); };
+$('#removeCover').onclick = () => { draft.cover=''; refresh(); };
+$('#gmail').onclick = () => {
+  if(!form.elements.buyerEmail.validity.valid){
+    switchStep('details');
+    form.elements.buyerEmail.reportValidity();
+    return;
+  }
+  const subject=[draft.heading,draft.number].filter(Boolean).join(' ');
+  const body='Hello '+(draft.buyer || '')+',\n\nPlease find your invoice attached.\n\n'+(draft.seller || '');
+  const params=new URLSearchParams({view:'cm',fs:'1',to:draft.buyerEmail,su:subject,body});
+  window.open('https://mail.google.com/mail/?'+params,'_blank','noopener,noreferrer');
+  status('Gmail draft opened. Save the invoice as a PDF and attach it in Gmail before sending.');
+};
 function companyProfile() {
   return Object.fromEntries(companyFields.map(name=>[name,draft[name]]));
 }
@@ -259,23 +292,48 @@ $('#saveInvoice').onclick = () => {
   if (write('', draft)) status('Invoice '+draft.number+' saved to history.');
 };
 const dialog = $('#historyDialog');
-function renderHistory() {
+function historyTotals(invoice){
+  const gross=totals(invoice.lines,invoice.priceMode).gross;
+  return {gross,balance:Math.max(0,gross-Number(scaled(invoice.paid,100,100000000)))};
+}
+function filteredHistory() {
   const filter = $('#historySearch').value.trim().toLowerCase();
-  const matches = archive.filter(({invoice})=>[invoice.number,invoice.buyer].some(value=>String(value).toLowerCase().includes(filter)));
+  const payment = $('#historyFilter').value;
+  return archive.filter(({invoice})=>[invoice.number,invoice.buyer].some(value=>String(value).toLowerCase().includes(filter))
+    && (payment==='all' || (historyTotals(invoice).balance>0)===(payment==='open')));
+}
+function renderHistory() {
+  const matches=filteredHistory();
   $('#historyList').innerHTML = matches.map(({invoice,id,updated})=>`<div class="saved-row"><div><strong>${escape(invoice.number)}</strong>
-    <small>${escape(invoice.buyer || 'Draft')} · ${euros(totals(invoice.lines).gross)} · ${escape(displayDate(updated.slice(0,10)))}</small></div>
+    <small>${escape(invoice.buyer || 'Draft')} · ${euros(historyTotals(invoice).gross)} total · ${euros(historyTotals(invoice).balance)} due · ${escape(displayDate(updated.slice(0,10)))}</small></div>
     <div class="actions"><button data-open="${escape(id)}">Open</button><button data-copy="${escape(id)}">Duplicate</button><button data-delete="${escape(id)}">Delete</button></div></div>`).join('') ||
-    (filter?'No invoices match your search.':'Saved invoices will appear here.');
+    (archive.length?'No invoices match your filters.':'Saved invoices will appear here.');
 }
 $('#history').onclick = () => {
   archive = read('-archive',archive);
   $('#historySearch').value = '';
+  $('#historyFilter').value = 'all';
   renderHistory();
   dialog.showModal();
   $('#historySearch').focus();
 };
 $('#closeHistory').onclick = () => dialog.close();
 $('#historySearch').oninput = renderHistory;
+$('#historyFilter').onchange = renderHistory;
+$('#historyExport').onclick = () => {
+  const cell=value=>'"'+String(value??'').replace(/^[\s]*[=+\-@]/,text=>"'"+text).replace(/"/g,'""')+'"';
+  const rows=[['Invoice number','Customer','Issue date','Payment due','EUR total','EUR balance']];
+  for(const {invoice} of filteredHistory()){
+    const {gross,balance}=historyTotals(invoice);
+    rows.push([invoice.number,invoice.buyer,invoice.issued,invoice.due,(gross/100).toFixed(2),(balance/100).toFixed(2)]);
+  }
+  const url=URL.createObjectURL(new Blob(['\ufeff',rows.map(row=>row.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));
+  const anchor=document.createElement('a');
+  anchor.href=url;
+  anchor.download='invoice-history.csv';
+  anchor.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
 $('#historyList').onclick = event => {
   const {open,copy,delete:remove} = event.target.dataset;
   const entry = archive.find(row=>row.id===(open || copy || remove));
