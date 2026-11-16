@@ -2,15 +2,28 @@
 const form = document.querySelector('#editor');
 const preview = document.querySelector('#preview');
 const items = document.querySelector('#items');
-const key = 'vat-invoice-draft-v1';
+const demo = new URLSearchParams(location.search).get('demo') === '1';
+const key = demo ? 'vat-invoice-demo-v1' : 'vat-invoice-draft-v1';
 const today = new Intl.DateTimeFormat('sv-SE').format(new Date());
 const blankLine = vat => ({ description: '', quantity: 1, price: 0, discount: 0, vat });
 const blank = () => ({ heading: 'VAT Invoice', seller: '', sellerAddress: '', sellerTax: '', email: '', buyer: '', buyerAddress: '', buyerTax: '', number: 'INV-0001', issued: today, supply: '', due: '', vat: 23, notes: '', logo: '', lines: [blankLine(23)] });
-let draft = blank();
+const example = () => ({
+  ...blank(), number: 'DEMO-0001', seller: 'Harbour Studio', sellerAddress: 'Sample address\nDublin, Ireland',
+  sellerTax: 'DEMO ONLY', buyer: 'West Quay Books', buyerAddress: 'Sample address\nCork, Ireland',
+  supply: today, notes: 'Fictional example. Payment due within 30 days.',
+  lines: [
+    { description: 'Display stand', quantity: 2, price: 125, discount: 10, vat: 23 },
+    { description: 'Printed catalogue', quantity: 5, price: 8, discount: 0, vat: 0 }
+  ]
+});
+let draft = demo ? example() : blank();
 try {
   const saved = JSON.parse(localStorage.getItem(key));
   if (saved && Array.isArray(saved.lines) && saved.lines.length) draft = { ...draft, ...saved };
-} catch { /* Recover with a blank invoice. */ }
+} catch { /* Keep the starting invoice if storage is unavailable. */ }
+document.querySelector('#demoNotice').hidden = !demo;
+document.querySelector('#demoLink').hidden = demo;
+document.querySelector('#example').textContent = demo ? 'Reset example' : 'Load example';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 const money = new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR' });
 const euros = cents => money.format(cents / 100);
@@ -106,10 +119,16 @@ document.querySelector('#logo').onchange = async event => {
   reader.readAsDataURL(file);
 };
 document.querySelector('#removeLogo').onclick = () => { draft.logo = ''; refresh(); };
-document.querySelector('#print').onclick = () => { if (form.reportValidity()) window.print(); };
+document.querySelector('#print').onclick = () => {
+  if (!form.reportValidity()) return;
+  const title = document.title;
+  document.title = [draft.number, draft.heading].join(' ').replace(/[<>:"/\\|?*]/g, '-');
+  window.addEventListener('afterprint', () => { document.title = title; }, { once: true });
+  window.print();
+};
 document.querySelector('#example').onclick = () => {
   if (!confirm('Replace the current draft with a fictional invoice?')) return;
-  draft = { ...blank(), seller: 'Harbour Studio', sellerAddress: 'Sample address\nDublin, Ireland', sellerTax: 'DEMO ONLY', buyer: 'West Quay Books', buyerAddress: 'Sample address\nCork, Ireland', supply: today, notes: 'Fictional example. Payment due within 30 days.', lines: [{ description: 'Display stand', quantity: 2, price: 125, discount: 10, vat: 23 }, { description: 'Printed catalogue', quantity: 5, price: 8, discount: 0, vat: 0 }] };
+  draft = example();
   refresh();
 };
 document.querySelector('#new').onclick = () => {
